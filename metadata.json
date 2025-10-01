@@ -1,0 +1,5 @@
+{
+  "name": "Local Lead Finder",
+  "description": "A one-click app that pulls local business email leads from Google Maps.",
+  "requestFramePermissions": []
+}
