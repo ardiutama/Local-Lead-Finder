@@ -76,18 +76,6 @@ const App: React.FC = () => {
     }
   }, []);
 
-  useEffect(() => {
-    const handler = setTimeout(() => {
-      if (location.trim()) {
-        setMapQuery(location.trim());
-      }
-    }, 500);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [location]);
-
   const handleSaveKey = (e: FormEvent) => {
     e.preventDefault();
     if (tempApiKey.trim()) {
@@ -432,10 +420,10 @@ Now, process the query and return the JSONL.`;
 
       {error && <div className="error-message" role="alert">{error}</div>}
       
-      {(leads.length > 0 || isLoading || mapQuery) && (
+      {(lastSearch || leads.length > 0) && !error && (
         <div className="content-wrapper">
             <section className="results-section">
-                { (leads.length > 0 || isLoading) && 
+                { (leads.length > 0 || isLoading) ? (
                     <>
                         <div className="results-header">
                             <h2>Found {leads.length} Leads {isLoading && <span className="loader-inline"></span>}</h2>
@@ -497,7 +485,9 @@ Now, process the query and return the JSONL.`;
                         ))}
                         </div>
                     </>
-                }
+                ) : (
+                    <EmptyState lastSearch={lastSearch} />
+                )}
             </section>
             {mapQuery && (
                 <aside className="map-section">
@@ -515,7 +505,7 @@ Now, process the query and return the JSONL.`;
         </div>
       )}
 
-      {!isLoading && !error && leads.length === 0 && !mapQuery && (
+      {!isLoading && !error && leads.length === 0 && !lastSearch && (
           <EmptyState lastSearch={lastSearch} />
       )}
       <footer className="footer">
