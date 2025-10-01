@@ -5,7 +5,6 @@
 
 import React, { useState, FormEvent, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { GoogleGenAI } from "@google/genai";
 
 interface BusinessLead {
   name: string;
@@ -78,8 +77,6 @@ const App: React.FC = () => {
     setSources([]);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
-      
       const prompt = `You are an expert business data extraction API. Your sole purpose is to find local business information and return it in a specific JSON format.
 **Query:** "${query}"
 **Rules:**
@@ -95,50 +92,70 @@ const App: React.FC = () => {
 {"name": "Another Business", "address": "456 Oak Ave, Anytown, USA 12345", "phone": null, "website": "http://www.anotherbusiness.com", "email": null, "category": "Retail", "rating": 4.0, "reviewCount": 85, "hours": null}
 Now, process the query and return the JSONL.`;
 
-      const responseStream = await ai.models.generateContentStream({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-          tools: [{googleSearch: {}}],
-        },
+      const response = await fetch('/.netlify/functions/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
       });
 
-      let jsonBuffer = '';
-      const collectedSources: GroundingChunk[] = [];
-      const sourceUris = new Set<string>();
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to fetch from server: ${response.status} ${errorText}`);
+      }
 
-      for await (const chunk of responseStream) {
-        // Collect unique grounding sources from chunks
-        const newChunks = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-        for (const newChunk of newChunks) {
-            if (newChunk.web && !sourceUris.has(newChunk.web.uri)) {
-                collectedSources.push(newChunk);
-                sourceUris.add(newChunk.web.uri);
-            }
-        }
-        if (collectedSources.length > 0) {
-            setSources([...collectedSources]);
-        }
-        
-        jsonBuffer += chunk.text;
+      if (!response.body) {
+        throw new Error("Response body is missing.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let streamBuffer = ''; // Buffer for incoming stream chunks from fetch
+      let jsonBuffer = '';   // Buffer for the JSONL content from the stream payload
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        streamBuffer += decoder.decode(value, { stream: true });
         
         let newlineIndex;
-        while ((newlineIndex = jsonBuffer.indexOf('\n')) !== -1) {
-            const line = jsonBuffer.substring(0, newlineIndex).trim();
-            jsonBuffer = jsonBuffer.substring(newlineIndex + 1);
+        while ((newlineIndex = streamBuffer.indexOf('\n')) !== -1) {
+          const line = streamBuffer.substring(0, newlineIndex).trim();
+          streamBuffer = streamBuffer.substring(newlineIndex + 1);
 
-            if (line) {
-                try {
-                    const parsedLead: BusinessLead = JSON.parse(line);
-                    setLeads(prevLeads => [...prevLeads, parsedLead]);
-                } catch (e) {
-                    console.warn("Could not parse JSON line:", line, e);
+          if (line) {
+            try {
+              const message = JSON.parse(line);
+
+              if (message.type === 'content' && message.payload) {
+                jsonBuffer += message.payload;
+                
+                let leadNewlineIndex;
+                while ((leadNewlineIndex = jsonBuffer.indexOf('\n')) !== -1) {
+                  const leadLine = jsonBuffer.substring(0, leadNewlineIndex).trim();
+                  jsonBuffer = jsonBuffer.substring(leadNewlineIndex + 1);
+                  if (leadLine) {
+                    try {
+                      const parsedLead: BusinessLead = JSON.parse(leadLine);
+                      setLeads(prevLeads => [...prevLeads, parsedLead]);
+                    } catch (e) {
+                      console.warn("Could not parse JSON lead line:", leadLine, e);
+                    }
+                  }
                 }
+              } else if (message.type === 'sources' && message.payload) {
+                const newChunks = message.payload as GroundingChunk[];
+                // Server sends unique sources, so just append them
+                setSources(prevSources => [...prevSources, ...newChunks]);
+              }
+            } catch (e) {
+              console.warn("Could not parse stream message:", line, e);
             }
+          }
         }
       }
-      
-      // Process any remaining data in the buffer
+
+      // Process any remaining data in the jsonBuffer
       if (jsonBuffer.trim()) {
         try {
             const parsedLead: BusinessLead = JSON.parse(jsonBuffer.trim());
