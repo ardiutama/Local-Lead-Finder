@@ -46,6 +46,7 @@ const App: React.FC = () => {
   const [radius, setRadius] = useState<string>('');
   const [leads, setLeads] = useState<BusinessLead[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isCreatingGist, setIsCreatingGist] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   const [mapQuery, setMapQuery] = useState<string>('');
@@ -66,6 +67,19 @@ const App: React.FC = () => {
       console.error("Failed to parse saved searches from localStorage", e);
     }
   }, []);
+
+  useEffect(() => {
+    // Debounce the map preview update
+    const handler = setTimeout(() => {
+      if (location.trim()) {
+        setMapQuery(location.trim());
+      }
+    }, 500); // 500ms delay after user stops typing
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [location]);
 
   const runSearch = async (query: string) => {
     setIsLoading(true);
@@ -236,8 +250,8 @@ Now, process the query and return the JSONL.`;
     }
   };
 
-  const exportCSV = () => {
-    if (leads.length === 0) return;
+  const generateCSVContent = (): string => {
+    if (leads.length === 0) return '';
     const headers = 'Name,Category,Rating,Review_Count,Address,Phone,Website,Email,Hours\n';
     const csvRows = leads.map(lead => {
         const row = [
@@ -256,8 +270,14 @@ Now, process the query and return the JSONL.`;
             return `"${str.replace(/"/g, '""')}"`;
         }).join(',');
     }).join('\n');
+    return headers + csvRows;
+  };
 
-    const blob = new Blob([headers + csvRows], { type: 'text/csv;charset=utf-8;' });
+  const exportCSV = () => {
+    const csvContent = generateCSVContent();
+    if (!csvContent) return;
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     if (link.href) {
         URL.revokeObjectURL(link.href);
@@ -270,18 +290,62 @@ Now, process the query and return the JSONL.`;
     document.body.removeChild(link);
   };
 
+  const saveToGist = async () => {
+    if (leads.length === 0) return;
+    setIsCreatingGist(true);
+    setError(null);
+
+    try {
+        const csvContent = generateCSVContent();
+        const description = `Business leads for: ${lastSearch}`;
+        const fileName = `${keyword.replace(/ /g, '_')}_${location.replace(/ /g, '_')}_leads.csv`;
+
+        const response = await fetch('https://api.github.com/gists', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/vnd.github.v3+json',
+            },
+            body: JSON.stringify({
+                description: description,
+                public: true,
+                files: {
+                    [fileName]: {
+                        content: csvContent,
+                    },
+                },
+            }),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(`GitHub API Error: ${errorData.message || response.statusText}`);
+        }
+
+        const gistData = await response.json();
+        if (gistData.html_url) {
+            window.open(gistData.html_url, '_blank');
+        } else {
+            throw new Error("Could not get Gist URL from GitHub API response.");
+        }
+
+    } catch (err) {
+        console.error("Failed to create Gist:", err);
+        let errorMessage = "Failed to save to GitHub Gist. Please try again.";
+        if (err instanceof Error) {
+            errorMessage = err.message;
+        }
+        setError(errorMessage);
+    } finally {
+        setIsCreatingGist(false);
+    }
+  };
+
   const handleCopy = (text: string, index: number, field: string) => {
     if(!text) return;
     navigator.clipboard.writeText(text).then(() => {
       setCopiedTooltip({index, field});
       setTimeout(() => setCopiedTooltip(null), 1500);
     });
-  };
-
-  const showPreviewMap = () => {
-    if (location.trim()) {
-      setMapQuery(location.trim());
-    }
   };
 
   return (
@@ -301,20 +365,15 @@ Now, process the query and return the JSONL.`;
           aria-label="Keyword"
           disabled={isLoading}
         />
-        <div className="input-group">
-            <input
-            type="text"
-            className="search-input"
-            value={location}
-            onChange={(e) => setLocation(e.target.value)}
-            placeholder="Enter Location"
-            aria-label="Location"
-            disabled={isLoading}
-            />
-            <button type="button" className="btn btn-preview" onClick={showPreviewMap} disabled={isLoading || !location.trim()} title="Preview location on map">
-                🗺️
-            </button>
-        </div>
+        <input
+        type="text"
+        className="search-input"
+        value={location}
+        onChange={(e) => setLocation(e.target.value)}
+        placeholder="Enter Location"
+        aria-label="Location"
+        disabled={isLoading}
+        />
         <input
           type="number"
           min="1"
@@ -369,6 +428,16 @@ Now, process the query and return the JSONL.`;
                                 </button>
                                 <button onClick={exportCSV} className="btn btn-secondary" disabled={leads.length === 0}>
                                     Export CSV
+                                </button>
+                                <button onClick={saveToGist} className="btn btn-secondary" disabled={leads.length === 0 || isCreatingGist}>
+                                    {isCreatingGist ? (
+                                        'Saving...'
+                                    ) : (
+                                        <>
+                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.19.01-.82.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21-.15.46-.55.38A8.013 8.013 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path></svg>
+                                            Save to Gist
+                                        </>
+                                    )}
                                 </button>
                             </div>
                         </div>

@@ -89,17 +89,6 @@ body {
     gap: 0.5rem;
 }
 
-.input-group {
-    display: flex;
-    gap: 0.5rem;
-    align-items: end;
-}
-
-.input-group .search-input {
-    flex-grow: 1;
-    min-width: 50px;
-}
-
 @media (max-width: 768px) {
     .search-form {
         grid-template-columns: 1fr 1fr;
@@ -184,22 +173,6 @@ body {
     border-color: var(--primary-color);
     color: var(--primary-color);
 }
-
-.btn-preview {
-    padding: 0;
-    width: 47px;
-    background-color: var(--card-background-color);
-    border: 1px solid var(--border-color);
-    color: var(--subtle-text-color);
-    font-size: 1.5rem;
-    line-height: 1;
-}
-
-.btn-preview:hover:not(:disabled) {
-    border-color: var(--primary-color);
-    color: var(--primary-color);
-}
-
 
 .pulsing-text {
   animation: pulse 1.5s infinite;
