@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, FormEvent, useRef, useEffect } from 'react';
+import React, { useState, FormEvent, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
+import { GoogleGenAI } from '@google/genai';
 
 interface BusinessLead {
   name: string;
@@ -18,7 +19,6 @@ interface BusinessLead {
   hours?: string;
 }
 
-// Fix: Add interface for grounding chunks.
 interface GroundingChunk {
     web?: {
       uri: string;
@@ -35,7 +35,7 @@ const EmptyState: React.FC<{ lastSearch: string }> = ({ lastSearch }) => (
       <p>
         {lastSearch
           ? `Your search for "${lastSearch}" did not return any results. Try adjusting your keywords or expanding your radius.`
-          : 'Use the form above to search for businesses by keyword and location.'}
+          : 'Enter your API key and use the form above to search for businesses.'}
       </p>
     </div>
   );
@@ -54,32 +54,51 @@ const App: React.FC = () => {
   const [copiedTooltip, setCopiedTooltip] = useState<{index: number, field: string} | null>(null);
   const [savedSearches, setSavedSearches] = useState<string[]>([]);
   const [canSaveSearch, setCanSaveSearch] = useState<boolean>(false);
-  // Fix: Add state for grounding sources.
   const [sources, setSources] = useState<GroundingChunk[]>([]);
-  
+  const [apiKey, setApiKey] = useState<string>('');
+  const [tempApiKey, setTempApiKey] = useState<string>('');
+  const [isKeySaved, setIsKeySaved] = useState<boolean>(false);
+
   useEffect(() => {
     try {
-      const storedSearches = localStorage.getItem('savedLeadSearches');
-      if (storedSearches) {
-        setSavedSearches(JSON.parse(storedSearches));
-      }
+        const savedKey = localStorage.getItem('geminiApiKey');
+        if (savedKey) {
+            setApiKey(savedKey);
+            setTempApiKey(savedKey);
+            setIsKeySaved(true);
+        }
+        const storedSearches = localStorage.getItem('savedLeadSearches');
+        if (storedSearches) {
+            setSavedSearches(JSON.parse(storedSearches));
+        }
     } catch (e) {
-      console.error("Failed to parse saved searches from localStorage", e);
+      console.error("Failed to parse from localStorage", e);
     }
   }, []);
 
   useEffect(() => {
-    // Debounce the map preview update
     const handler = setTimeout(() => {
       if (location.trim()) {
         setMapQuery(location.trim());
       }
-    }, 500); // 500ms delay after user stops typing
+    }, 500);
 
     return () => {
       clearTimeout(handler);
     };
   }, [location]);
+
+  const handleSaveKey = (e: FormEvent) => {
+    e.preventDefault();
+    if (tempApiKey.trim()) {
+        setApiKey(tempApiKey.trim());
+        localStorage.setItem('geminiApiKey', tempApiKey.trim());
+        setIsKeySaved(true);
+        setError(null);
+    } else {
+        setError("Please enter a valid API Key.");
+    }
+  }
 
   const runSearch = async (query: string) => {
     setIsLoading(true);
@@ -90,7 +109,14 @@ const App: React.FC = () => {
     setCanSaveSearch(false);
     setSources([]);
 
+    if (!apiKey) {
+      setError("API Key is not set. Please set your API key above.");
+      setIsLoading(false);
+      return;
+    }
+
     try {
+      const ai = new GoogleGenAI({apiKey});
       const prompt = `You are an expert business data extraction API. Your sole purpose is to find local business information and return it in a specific JSON format.
 **Query:** "${query}"
 **Rules:**
@@ -106,70 +132,47 @@ const App: React.FC = () => {
 {"name": "Another Business", "address": "456 Oak Ave, Anytown, USA 12345", "phone": null, "website": "http://www.anotherbusiness.com", "email": null, "category": "Retail", "rating": 4.0, "reviewCount": 85, "hours": null}
 Now, process the query and return the JSONL.`;
 
-      const response = await fetch('/.netlify/functions/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt }),
+      const stream = await ai.models.generateContentStream({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: {
+            tools: [{googleSearch: {}}],
+        },
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to fetch from server: ${response.status} ${errorText}`);
-      }
+      let jsonBuffer = '';
+      const processedSourceUris = new Set<string>();
 
-      if (!response.body) {
-        throw new Error("Response body is missing.");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let streamBuffer = ''; // Buffer for incoming stream chunks from fetch
-      let jsonBuffer = '';   // Buffer for the JSONL content from the stream payload
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        streamBuffer += decoder.decode(value, { stream: true });
-        
-        let newlineIndex;
-        while ((newlineIndex = streamBuffer.indexOf('\n')) !== -1) {
-          const line = streamBuffer.substring(0, newlineIndex).trim();
-          streamBuffer = streamBuffer.substring(newlineIndex + 1);
-
-          if (line) {
-            try {
-              const message = JSON.parse(line);
-
-              if (message.type === 'content' && message.payload) {
-                jsonBuffer += message.payload;
-                
-                let leadNewlineIndex;
-                while ((leadNewlineIndex = jsonBuffer.indexOf('\n')) !== -1) {
-                  const leadLine = jsonBuffer.substring(0, leadNewlineIndex).trim();
-                  jsonBuffer = jsonBuffer.substring(leadNewlineIndex + 1);
-                  if (leadLine) {
-                    try {
-                      const parsedLead: BusinessLead = JSON.parse(leadLine);
-                      setLeads(prevLeads => [...prevLeads, parsedLead]);
-                    } catch (e) {
-                      console.warn("Could not parse JSON lead line:", leadLine, e);
-                    }
-                  }
-                }
-              } else if (message.type === 'sources' && message.payload) {
-                const newChunks = message.payload as GroundingChunk[];
-                // Server sends unique sources, so just append them
-                setSources(prevSources => [...prevSources, ...newChunks]);
-              }
-            } catch (e) {
-              console.warn("Could not parse stream message:", line, e);
+      for await (const chunk of stream) {
+        const newChunks = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks;
+        if (newChunks) {
+            const uniqueNewChunks = newChunks.filter(c => c.web?.uri && !processedSourceUris.has(c.web.uri));
+            if (uniqueNewChunks.length > 0) {
+                uniqueNewChunks.forEach(c => processedSourceUris.add(c.web!.uri));
+                setSources(prev => [...prev, ...uniqueNewChunks]);
             }
-          }
+        }
+        
+        const text = chunk.text;
+        if (text) {
+            jsonBuffer += text;
+            
+            let leadNewlineIndex;
+            while ((leadNewlineIndex = jsonBuffer.indexOf('\n')) !== -1) {
+                const leadLine = jsonBuffer.substring(0, leadNewlineIndex).trim();
+                jsonBuffer = jsonBuffer.substring(leadNewlineIndex + 1);
+                if (leadLine) {
+                    try {
+                        const parsedLead: BusinessLead = JSON.parse(leadLine);
+                        setLeads(prevLeads => [...prevLeads, parsedLead]);
+                    } catch (e) {
+                        console.warn("Could not parse JSON lead line:", leadLine, e);
+                    }
+                }
+            }
         }
       }
 
-      // Process any remaining data in the jsonBuffer
       if (jsonBuffer.trim()) {
         try {
             const parsedLead: BusinessLead = JSON.parse(jsonBuffer.trim());
@@ -181,18 +184,13 @@ Now, process the query and return the JSONL.`;
 
     } catch (err) {
       console.error(err);
-      let errorMessage = "An unexpected error occurred. Please try again.";
+      let errorMessage = "An unexpected error occurred. Please check the console and your API key.";
       if (err instanceof Error) {
-        if (err.message.includes('JSON')) {
-          errorMessage = "Failed to process the response. The format might be invalid.";
-        } else {
-          errorMessage = err.message;
-        }
+        errorMessage = err.message;
       }
       setError(errorMessage);
     } finally {
       setIsLoading(false);
-      // Check if any leads were found to enable saving
       setLeads(currentLeads => {
         if(currentLeads.length > 0) {
             const isSaved = savedSearches.some(s => s.toLowerCase() === query.toLowerCase());
@@ -354,6 +352,25 @@ Now, process the query and return the JSONL.`;
         <h1>Local Lead Finder</h1>
         <p>Instantly find business leads from Google Maps.</p>
       </header>
+
+      <section className="api-key-section">
+        <form className="api-key-form" onSubmit={handleSaveKey}>
+            <input
+                type="password"
+                className="api-key-input"
+                value={tempApiKey}
+                onChange={(e) => setTempApiKey(e.target.value)}
+                placeholder="Enter your Gemini API Key"
+                aria-label="Gemini API Key"
+            />
+            <button type="submit" className="btn btn-secondary">
+                {isKeySaved ? 'Update Key' : 'Save Key'}
+            </button>
+        </form>
+        <p className="api-key-notice">
+            Your API key is stored locally in your browser.
+        </p>
+      </section>
       
       <form className="search-form" onSubmit={findLeads}>
         <input
@@ -363,7 +380,7 @@ Now, process the query and return the JSONL.`;
           onChange={(e) => setKeyword(e.target.value)}
           placeholder="Enter Keyword"
           aria-label="Keyword"
-          disabled={isLoading}
+          disabled={!isKeySaved || isLoading}
         />
         <input
         type="text"
@@ -372,7 +389,7 @@ Now, process the query and return the JSONL.`;
         onChange={(e) => setLocation(e.target.value)}
         placeholder="Enter Location"
         aria-label="Location"
-        disabled={isLoading}
+        disabled={!isKeySaved || isLoading}
         />
         <input
           type="number"
@@ -382,14 +399,14 @@ Now, process the query and return the JSONL.`;
           onChange={(e) => setRadius(e.target.value)}
           placeholder="Radius (km) - Optional"
           aria-label="Radius (in km) - Optional"
-          disabled={isLoading}
+          disabled={!isKeySaved || isLoading}
         />
         <div className="form-actions">
-            <button type="submit" className="btn btn-primary" disabled={isLoading || !keyword.trim() || !location.trim()}>
+            <button type="submit" className="btn btn-primary" disabled={!isKeySaved || isLoading || !keyword.trim() || !location.trim()}>
             {isLoading ? <span className="pulsing-text">Searching...</span> : 'Find Leads'}
             </button>
             {canSaveSearch && !isLoading && (
-                 <button type="button" onClick={saveSearch} className="btn btn-save" title="Save this search">
+                 <button type="button" onClick={saveSearch} className="btn btn-save" title="Save this search" disabled={!isKeySaved}>
                     💾
                  </button>
             )}
@@ -399,7 +416,7 @@ Now, process the query and return the JSONL.`;
         {savedSearches.length > 0 && (
             <div className="saved-searches-container">
                 {savedSearches.slice(0, 10).map((search, index) => (
-                    <button key={index} onClick={() => handleSavedSearchClick(search)} className="saved-search-tag">
+                    <button key={index} onClick={() => handleSavedSearchClick(search)} className="saved-search-tag" disabled={!isKeySaved || isLoading}>
                         {search}
                     </button>
                 ))}

@@ -1,9 +1,5 @@
 {
   "name": "local-lead-finder",
   "version": "1.0.0",
-  "description": "A serverless function to securely find local business leads.",
-  "type": "module",
-  "dependencies": {
-    "@google/genai": "^1.21.0"
-  }
+  "description": "A one-click app that pulls local business email leads from Google Maps."
 }
